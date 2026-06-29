@@ -123,7 +123,8 @@ func loadJSONFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cleaned := stripJSONComments(data)
+	expanded := os.ExpandEnv(string(data))
+	cleaned := stripJSONComments([]byte(expanded))
 	var cfg Config
 	if err := json.Unmarshal(cleaned, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)

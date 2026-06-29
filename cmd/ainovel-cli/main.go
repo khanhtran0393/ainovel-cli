@@ -10,9 +10,35 @@ import (
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/entry/headless"
 	"github.com/voocel/ainovel-cli/internal/entry/tui"
+	"github.com/voocel/ainovel-cli/internal/entry/webgui"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	buildversion "github.com/voocel/ainovel-cli/internal/version"
 )
+
+func init() {
+	// Simple pure-go .env loader (for Go build mode)
+	data, err := os.ReadFile(".env")
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key, val := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+				if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+					val = val[1 : len(val)-1]
+				} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+					val = val[1 : len(val)-1]
+				}
+				if os.Getenv(key) == "" {
+					os.Setenv(key, val)
+				}
+			}
+		}
+	}
+}
 
 var (
 	version = "dev"
@@ -103,6 +129,12 @@ func runWithConfig(cfg bootstrap.Config, opts cliOptions, args []string) {
 	}
 
 	bundle := assets.Load(cfg.Style)
+	if opts.GUI {
+		if err := webgui.Run(cfg, bundle, opts.ConfigPath, opts.Port); err != nil {
+			die("lỗi webgui: %v", err)
+		}
+		return
+	}
 	if opts.Headless {
 		prompt, err := loadPrompt(opts)
 		if err != nil {
@@ -124,6 +156,8 @@ func runWithConfig(cfg bootstrap.Config, opts cliOptions, args []string) {
 type cliOptions struct {
 	ConfigPath    string
 	Headless      bool
+	GUI           bool
+	Port          string
 	Prompt        string
 	PromptFile    string
 	Version       bool
@@ -167,6 +201,14 @@ func parseCLIOptions(argv []string) (cliOptions, []string, error) {
 			i++
 		case "--headless":
 			opts.Headless = true
+		case "--gui":
+			opts.GUI = true
+		case "--port":
+			if i+1 >= len(argv) {
+				return opts, nil, fmt.Errorf("--port thiếu giá trị")
+			}
+			opts.Port = argv[i+1]
+			i++
 		case "--prompt":
 			if i+1 >= len(argv) {
 				return opts, nil, fmt.Errorf("--prompt thiếu giá trị")
@@ -186,10 +228,13 @@ func parseCLIOptions(argv []string) (cliOptions, []string, error) {
 	if opts.Prompt != "" && opts.PromptFile != "" {
 		return opts, nil, fmt.Errorf("--prompt và --prompt-file không thể dùng đồng thời")
 	}
-	if opts.Version && (opts.Update || opts.ConfigPath != "" || opts.Headless || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
+	if opts.GUI && opts.Headless {
+		return opts, nil, fmt.Errorf("--gui và --headless không thể dùng đồng thời")
+	}
+	if opts.Version && (opts.Update || opts.ConfigPath != "" || opts.Headless || opts.GUI || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
 		return opts, nil, fmt.Errorf("version không thể dùng chung với các tham số khởi động khác")
 	}
-	if opts.Update && (opts.ConfigPath != "" || opts.Headless || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
+	if opts.Update && (opts.ConfigPath != "" || opts.Headless || opts.GUI || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
 		return opts, nil, fmt.Errorf("update không thể dùng chung với các tham số khởi động khác")
 	}
 	return opts, args, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -291,19 +292,32 @@ type failoverModel struct {
 	report    FailoverReporter
 }
 
+
 func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	current := m.currentTarget()
+	fallbackIndex := 0
+retry:
 	resp, err := current.model.Generate(ctx, messages, tools, opts...)
 	if err == nil {
 		return resp, nil
 	}
 
-	next, reason, ok := m.pickFallback(current, err)
-	if !ok {
-		return nil, err
+	for fallbackIndex < len(m.fallbacks) {
+		next := m.fallbacks[fallbackIndex]
+		fallbackIndex++
+		if next.model == nil {
+			continue
+		}
+		reason := agentcore.FailoverReason(err)
+		if reason == "" {
+			reason = "auto_fallback"
+		}
+		m.reportFailover(current, next, reason, err)
+		current = next
+		time.Sleep(2 * time.Second)
+		goto retry
 	}
-	m.reportFailover(current, next, reason, err)
-	return next.model.Generate(ctx, messages, tools, opts...)
+	return nil, err
 }
 
 func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
@@ -313,18 +327,25 @@ func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore
 		defer close(out)
 
 		current := m.currentTarget()
-		fallbackUsed := false
+		fallbackIndex := 0
 
 	retry:
 		source, resp, err := m.startAttempt(ctx, current, messages, tools, opts...)
 		if err != nil {
-			if !fallbackUsed {
-				if next, reason, ok := m.pickFallback(current, err); ok {
-					fallbackUsed = true
-					m.reportFailover(current, next, reason, err)
-					current = next
-					goto retry
+			for fallbackIndex < len(m.fallbacks) {
+				next := m.fallbacks[fallbackIndex]
+				fallbackIndex++
+				if next.model == nil {
+					continue
 				}
+				reason := agentcore.FailoverReason(err)
+				if reason == "" {
+					reason = "auto_fallback"
+				}
+				m.reportFailover(current, next, reason, err)
+				current = next
+				time.Sleep(2 * time.Second)
+				goto retry
 			}
 			out <- agentcore.StreamEvent{Type: agentcore.StreamEventError, Err: err}
 			return
@@ -338,25 +359,32 @@ func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore
 			return
 		}
 
-		forwarded := false
 		for ev := range source {
-			switch ev.Type {
-			case agentcore.StreamEventError:
-				if ev.Err != nil && !forwarded && !fallbackUsed {
-					if next, reason, ok := m.pickFallback(current, ev.Err); ok {
-						fallbackUsed = true
-						m.reportFailover(current, next, reason, ev.Err)
-						current = next
-						goto retry
+			if ev.Err != nil {
+				for fallbackIndex < len(m.fallbacks) {
+					next := m.fallbacks[fallbackIndex]
+					fallbackIndex++
+					if next.model == nil {
+						continue
 					}
+					reason := agentcore.FailoverReason(ev.Err)
+					if reason == "" {
+						reason = "auto_fallback"
+					}
+					m.reportFailover(current, next, reason, ev.Err)
+					current = next
+					time.Sleep(2 * time.Second)
+					goto retry
 				}
 				out <- ev
 				return
+			}
+
+			switch ev.Type {
 			case agentcore.StreamEventDone:
 				out <- ev
 				return
 			default:
-				forwarded = true
 				out <- ev
 			}
 		}
@@ -420,6 +448,11 @@ func (m *failoverModel) pickFallback(current modelTarget, err error) (modelTarge
 }
 
 func (m *failoverModel) reportFailover(from, to modelTarget, reason string, err error) {
+	fmt.Fprintf(os.Stderr, "\n[FAILOVER] Chuyển đổi thành công: Role=%s | Từ=%s/%s ➔ Sang=%s/%s | Lý do=%s\n", m.role, from.provider, from.name, to.provider, to.name, err)
+	slog.Info("=== [FAILOVER] CHUYỂN HOÁN THÀNH CÔNG ===", "role", m.role, "từ", from.provider, "sang", to.provider, "model", to.name, "err", err)
+	if m.primary != nil {
+		m.primary.Swap(to.provider, to.name, to.model)
+	}
 	if m.report != nil {
 		m.report(FailoverEvent{
 			Role:         m.role,
